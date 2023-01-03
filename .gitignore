@@ -1,0 +1,12 @@
+.idea
+STS
+__pycache__
+paraphrase-at-scale
+models
+preprocess/count_tokens.py
+preprocess/mosesdecoder
+preprocess/paranmt-*
+preprocess/paranmt/fastText-0.9.2
+preprocess/paranmt/para-nmt-50m.txt
+preprocess/paranmt/paranmt.*
+preprocess/paranmt/scratch
