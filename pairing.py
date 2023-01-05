@@ -1,6 +1,8 @@
 import torch
+from torch.nn.functional import pad
 from utils import Batch
 from utils import BigExample
+
 
 def get_pairs_batch(model, g1, g1_lengths, g2, g2_lengths):
     with torch.no_grad():
@@ -9,6 +11,18 @@ def get_pairs_batch(model, g1, g1_lengths, g2, g2_lengths):
         all_g1_lengths = torch.cat(g1_lengths)
         all_g2_lengths = torch.cat(g2_lengths)
 
+        g1_max_length = max(i.size(1) for i in g1)
+        all_g1 = torch.cat([
+            pad(i, (0, g1_max_length - i.size(1)), "constant", 0)
+            for i in g1
+        ])
+
+        g2_max_length = max(i.size(1) for i in g2)
+        all_g2 = torch.cat([
+            pad(i, (0, g2_max_length - i.size(1)), "constant", 0)
+            for i in g2
+        ])
+
         v_g1 = []
         for i in range(len(g1)):
             v_g1.append(model.encode(g1[i], g1_lengths[i]))
@@ -16,43 +30,25 @@ def get_pairs_batch(model, g1, g1_lengths, g2, g2_lengths):
         v_g2 = []
         for i in range(len(g2)):
             v_g2.append(model.encode(g2[i], g2_lengths[i], fr=1))
+
         v_g1 = torch.cat(v_g1)
         v_g2 = torch.cat(v_g2)
 
-        n1 = v_g1.size()[0]
-        p1 = torch.zeros((n1, torch.max(all_g2_lengths).item())).long()
-        p1_lengths = torch.zeros(all_g2_lengths.size()).long()
+        v_g1_norm = v_g1 / v_g1.norm(dim=1, keepdim=True)
+        v_g2_norm = v_g2 / v_g2.norm(dim=1, keepdim=True)
 
-        n2 = v_g2.size()[0]
-        p2 = torch.zeros((n2, torch.max(all_g1_lengths).item())).long()
-        p2_lengths = torch.zeros(all_g1_lengths.size()).long()
+        sims = torch.matmul(v_g2_norm, v_g1_norm.t())
+        eye = torch.eye(sims.shape[0]).cuda()
+        sims = (1 - eye) * sims - eye
+        _, ids = torch.max(sims, 0)
+        p1 = all_g2[ids]
+        p1_lengths = all_g2_lengths[ids]
 
-        if model.gpu:
-            p1 = p1.cuda()
-            p1_lengths = p1_lengths.cuda()
-        for i in range(n1):
-            v = v_g1[i].expand(n1, v_g1.size()[1])
-            scores = model.cosine(v, v_g2)
-            scores[i] = -1
-            _, idx = torch.max(scores, 0)
-            idx = idx.item()
-            p1_lengths[i] = all_g2_lengths[idx]
-            g2_batch_idx = idx // model.batchsize
-            g2_idx = idx % model.batchsize
-            p1[i, 0:g2_lengths[g2_batch_idx][g2_idx]] = g2[g2_batch_idx][g2_idx][0:all_g2_lengths[idx]]
-
-        if model.gpu:
-            p2 = p2.cuda()
-            p2_lengths = p2_lengths.cuda()
-        for i in range(n2):
-            v = v_g2[i].expand(n2, v_g2.size()[1])
-            scores = model.cosine(v, v_g1)
-            scores[i] = -1
-            _, idx = torch.max(scores, 0)
-            idx = idx.item()
-            p2_lengths[i] = all_g1_lengths[idx]
-            p2[i, 0:g1_lengths[idx // model.batchsize][idx % model.batchsize]] = \
-                g1[idx // model.batchsize][idx % model.batchsize][0:all_g1_lengths[idx]]
+        sims = torch.matmul(v_g1_norm, v_g2_norm.t())
+        sims = (1 - eye) * sims - eye
+        _, ids = torch.max(sims, 0)
+        p2 = all_g1[ids]
+        p2_lengths = all_g1_lengths[ids]
 
         def split(arr, lis):
             idx = 0
@@ -80,6 +76,7 @@ def get_pairs_batch(model, g1, g1_lengths, g2, g2_lengths):
         p2 = _p2
 
         model.train()
+
         return p1, p1_lengths, p2, p2_lengths
 
 def compute_loss_one_batch(model):
