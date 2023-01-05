@@ -103,20 +103,23 @@ def get_minibatches_idx(n, minibatch_size, shuffle=False):
     return list(zip(range(len(minibatches)), minibatches))
 
 def max_pool(x, lengths, gpu):
-    out = torch.FloatTensor(x.size(0), x.size(2)).zero_()
+    mask = torch.arange(x.size(1), dtype=torch.int32)[None, :]
+    v = torch.full(mask.size(), float("-inf"))
+    z = torch.zeros(mask.size())
     if gpu:
-        out = out.cuda()
-    for i in range(len(lengths)):
-        out[i] = torch.max(x[i][0:lengths[i]], 0)[0]
-    return out
+        mask = mask.cuda()
+        v = v.cuda()
+        z = z.cuda()
+    mask = mask < lengths[:, None]
+    mask = torch.where((1 - mask.int()).bool(), v, z)
+    return torch.max(x + mask.unsqueeze(2), dim=1)[0]
 
 def mean_pool(x, lengths, gpu):
-    out = torch.FloatTensor(x.size(0), x.size(2)).zero_()
+    mask = torch.arange(x.size(1), dtype=torch.int32)[None, :]
     if gpu:
-        out = out.cuda()
-    for i in range(len(lengths)):
-        out[i] = torch.mean(x[i][0:lengths[i]], 0)
-    return out
+        mask = mask.cuda()
+    mask = mask < lengths[:, None]
+    return (x * mask.unsqueeze(2)).sum(dim=1) / lengths[:, None]
 
 def lookup(words, w, zero_unk):
     if w in words:
