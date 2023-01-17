@@ -1,7 +1,6 @@
 import torch
 from torch.nn.functional import pad
 from utils import Batch
-from utils import BigExample
 
 
 def get_pairs_batch(model, g1, g1_lengths, g2, g2_lengths):
@@ -79,13 +78,14 @@ def get_pairs_batch(model, g1, g1_lengths, g2, g2_lengths):
 
         return p1, p1_lengths, p2, p2_lengths
 
-def compute_loss_one_batch(model):
+def compute_loss_one_batch(model, data_iter):
     if len(model.megabatch) == 0:
 
         if model.megabatch_anneal == 0:
             for i in range(model.max_megabatch_size):
-                if model.curr_idx < len(model.mb):
-                    model.megabatch.append(model.mb[model.curr_idx][1])
+                next_batch = next(data_iter, None)
+                if next_batch:
+                    model.megabatch.append(next_batch)
                     model.curr_idx += 1
         else:
             if model.increment and model.curr_megabatch_size < model.max_megabatch_size:
@@ -94,26 +94,12 @@ def compute_loss_one_batch(model):
                 print("Increasing megabatch size to {0}".format(model.curr_megabatch_size))
 
             for i in range(model.curr_megabatch_size):
-                if model.curr_idx < len(model.mb):
-                    model.megabatch.append(model.mb[model.curr_idx][1])
+                next_batch = next(data_iter, None)
+                if next_batch:
+                    model.megabatch.append(next_batch)
                     model.curr_idx += 1
                     if model.curr_idx % model.megabatch_anneal == 0:
                         model.increment = True
-
-        megabatch = []
-        for n, i in enumerate(model.megabatch):
-            arr = [model.data[t] for t in i]
-            example_arr = []
-            for j in arr:
-                example = (BigExample(j[0], model.vocab, model.rev_vocab, model.scramble_rate),
-                           BigExample(j[1], model.vocab, model.rev_vocab, model.scramble_rate))
-                if model.args.debug:
-                    print("Logging Pairing: {0} {1}".format(j[0].sentence, j[1].sentence))
-
-                example_arr.append(example)
-            megabatch.append(example_arr)
-
-        model.megabatch = megabatch
 
         if len(model.megabatch) == 0:
             return None
@@ -125,16 +111,12 @@ def compute_loss_one_batch(model):
         sents2_lengths_list = []
 
         for j in model.megabatch:
+            sents_1_torch, sents_2_torch, lengths_1_torch, lengths_2_torch = j
 
-            sents1 = [i[0] for i in j]
-            sents2 = [i[1] for i in j]
-
-            sents_1_torch, lengths_1_torch = model.torchify_batch(sents1)
             if model.gpu:
                 sents_1_torch = sents_1_torch.cuda()
                 lengths_1_torch = lengths_1_torch.cuda()
 
-            sents_2_torch, lengths_2_torch = model.torchify_batch(sents2)
             if model.gpu:
                 sents_2_torch = sents_2_torch.cuda()
                 lengths_2_torch = lengths_2_torch.cuda()

@@ -3,8 +3,10 @@ import torch.nn as nn
 import numpy as np
 import time
 import torch.nn.functional as F
+from sacremoses import MosesTokenizer
 import sentencepiece as spm
 import pairing
+import paraphrastic_dataset
 import utils
 from torch.nn.modules.distance import CosineSimilarity
 from torch.nn.utils.rnn import pad_packed_sequence as unpack
@@ -12,24 +14,33 @@ from torch.nn.utils.rnn import pack_padded_sequence as pack
 from evaluate_sts import evaluate_sts
 from torch import optim
 
-def load_model(data, args):
-    if not args.gpu:
-        model = torch.load(args.load_file, map_location=torch.device('cpu'))
+def load_model(args=None, data=None, gpu=0, model_name=None,
+        sp_model=None, megabatch_anneal=None):
+
+    if args:
+        gpu = args.gpu
+        if 'sp_model' in args:
+            sp_model = args.sp_model
+        if 'megabatch_anneal' in args:
+            megabatch_anneal= args.megabatch_anneal
+        model_name = args.load_file
+        
+    if not gpu:
+        model = torch.load(model_name, map_location=torch.device('cpu'))
     else:
-        model = torch.load(args.load_file)
+        model = torch.load(model_name)
 
     state_dict = model['state_dict']
     model_args = model['args']
     vocab = model['vocab']
-    vocab_fr = model['vocab_fr']
     optimizer = model['optimizer']
     epoch = model['epoch'] + 1
 
-    if 'sp_model' in args:
-        model_args.sp_model = args.sp_model
-    if 'megabatch_anneal' in args:
-        model_args.megabatch_anneal = args.megabatch_anneal
-    model_args.gpu = args.gpu
+    if sp_model is not None:
+        model_args.sp_model = sp_model
+    if megabatch_anneal is not None:
+        model_args.megabatch_anneal = megabatch_anneal
+    model_args.gpu = gpu
 
     if model_args.model == "avg":
         model = Averaging(data, model_args, vocab, vocab_fr)
@@ -42,13 +53,16 @@ def load_model(data, args):
     return model, epoch
 
 class ParaModel(nn.Module):
-    def __init__(self, data, args, vocab, vocab_fr):
+    def __init__(self, args, vocab):
         super(ParaModel, self).__init__()
 
-        self.data = data
         self.args = args
         self.gpu = args.gpu
+        self.epochs = args.epochs
+        self.debug = args.debug
         self.save_interval = args.save_interval
+        self.save_every_epoch = args.save_every_epoch
+        self.save_final = args.save_final
         if "report_interval" in args:
             self.report_interval = args.report_interval
         else:
@@ -56,17 +70,17 @@ class ParaModel(nn.Module):
 
         self.vocab = vocab
         self.rev_vocab = {v:k for k,v in vocab.items()}
-        self.vocab_fr = vocab_fr
-        self.ngrams = args.ngrams
+        self.lower_case = args.lower_case
 
         self.delta = args.delta
         self.pool = args.pool
+        self.dim = args.dim
+        self.lr = args.lr
+        self.grad_clip = args.grad_clip
 
         self.dropout = args.dropout
         self.share_encoder = args.share_encoder
-        self.share_vocab = args.share_vocab
         self.scramble_rate = args.scramble_rate
-        self.zero_unk = args.zero_unk
 
         self.batchsize = args.batchsize
         self.max_megabatch_size = args.megabatch_size
@@ -78,54 +92,24 @@ class ParaModel(nn.Module):
         self.sim_loss = nn.MarginRankingLoss(margin=self.delta)
         self.cosine = CosineSimilarity()
 
-        self.embedding = nn.Embedding(len(self.vocab), self.args.dim)
-        if self.vocab_fr is not None:
-            self.embedding_fr = nn.Embedding(len(self.vocab_fr), self.args.dim)
+        self.embedding = nn.Embedding(len(self.vocab), self.dim)
 
-        self.sp = None
-        if args.sp_model:
-            self.sp = spm.SentencePieceProcessor()
-            self.sp.Load(args.sp_model)
+        self.sp = spm.SentencePieceProcessor()
+        self.sp.Load(args.sp_model)
 
     def save_params(self, epoch, counter=None):
         if counter is None:
             torch.save({'state_dict': self.state_dict(),
                     'vocab': self.vocab,
-                    'vocab_fr': self.vocab_fr,
                     'args': self.args,
                     'optimizer': self.optimizer.state_dict(),
                     'epoch': epoch}, "{0}_{1}.pt".format(self.args.outfile, epoch))
         else:
             torch.save({'state_dict': self.state_dict(),
                     'vocab': self.vocab,
-                    'vocab_fr': self.vocab_fr,
                     'args': self.args,
                     'optimizer': self.optimizer.state_dict(),
                     'epoch': epoch, 'counter': counter}, "{0}_{1}_{2}.pt".format(self.args.outfile, epoch, counter))
-
-    def torchify_batch(self, batch):
-        max_len = 0
-        for i in batch:
-            if len(i.embeddings) > max_len:
-                max_len = len(i.embeddings)
-
-        batch_len = len(batch)
-
-        np_sents = np.zeros((batch_len, max_len), dtype='int32')
-        np_lens = np.zeros((batch_len,), dtype='int32')
-
-        for i, ex in enumerate(batch):
-            np_sents[i, :len(ex.embeddings)] = ex.embeddings
-            np_lens[i] = len(ex.embeddings)
-
-        idxs, lengths = torch.from_numpy(np_sents).long(), \
-                               torch.from_numpy(np_lens).float().long()
-
-        if self.gpu:
-            idxs = idxs.cuda()
-            lengths = lengths.cuda()
-    
-        return idxs, lengths
 
     def loss_function(self, g1, g2, p1, p2):
         g1g2 = self.cosine(g1, g2)
@@ -145,51 +129,68 @@ class ParaModel(nn.Module):
         g2 = self.encode(g_idxs2, g_lengths2, fr=fr1)
         return self.cosine(g1, g2)
 
-    def train_epochs(self, start_epoch=1):
+    def train_epochs(self, data_file, start_epoch=1):
         start_time = time.time()
         self.megabatch = []
         self.ep_loss = 0
         self.curr_idx = 0
 
         self.eval()
-        evaluate_sts(self, self.args)
+        evaluate_sts(self)
         self.train()
 
+        dataset = paraphrastic_dataset.ParaphrasticDataset(data_file, "data")
+
         try:
-            for ep in range(start_epoch, self.args.epochs+1):
-                self.mb = utils.get_minibatches_idx(len(self.data), self.args.batchsize, shuffle=True)
+            for ep in range(start_epoch, self.epochs+1):
                 self.curr_idx = 0
                 self.ep_loss = 0
                 self.megabatch = []
                 cost = 0
                 counter = 0
+                data_loader = torch.utils.data.DataLoader(
+                    dataset=dataset,
+                    batch_size=self.batchsize,
+                    shuffle=True,
+                    num_workers=4,
+                    prefetch_factor=50,
+                    collate_fn=paraphrastic_dataset.paraphrastic_collate_fn,
+                )
+
+                data_iter = iter(data_loader)
 
                 while(cost is not None):
-                    cost = pairing.compute_loss_one_batch(self)
+                    cost = pairing.compute_loss_one_batch(self, data_iter)
                     if cost is None:
                         continue
 
                     self.ep_loss += cost.item()
                     counter += 1
+                    #print("Loss: {0}".format(self.ep_loss))
+
+                   # if counter == 4000:
+                   #     import sys
+                   #     sys.exit()
+
                     if counter % self.report_interval == 0:
-                        print("Epoch {0}, Counter {1}/{2}".format(ep, counter, len(self.mb)))
+                        print("Epoch {0}, Counter {1}/{2}".format(ep, counter, len(data_iter)))
                     if self.save_interval > 0 and counter > 0:
                         if counter % self.save_interval == 0:
                             self.eval()
-                            evaluate_sts(self, self.args)
+                            evaluate_sts(self)
                             self.train()
                             self.save_params(ep, counter=counter)
 
                     self.optimizer.zero_grad()
                     cost.backward()
-                    torch.nn.utils.clip_grad_norm_(self.parameters, self.args.grad_clip)
+                    torch.nn.utils.clip_grad_norm_(self.parameters, self.grad_clip)
                     self.optimizer.step()
 
                 self.eval()
-                evaluate_sts(self, self.args)
+                evaluate_sts(self)
                 self.train()
 
-                if self.args.save_every_epoch:
+                if self.save_every_epoch:
                     self.save_params(ep)
 
                 print('Epoch {0}\tCost: '.format(ep), self.ep_loss / counter)
@@ -197,19 +198,19 @@ class ParaModel(nn.Module):
         except KeyboardInterrupt:
             print("Training Interrupted")
 
-        if self.args.save_final:
+        if self.save_final:
             self.save_params(ep)
 
         end_time = time.time()
         print("Total Time:", (end_time - start_time))
 
 class Averaging(ParaModel):
-    def __init__(self, data, args, vocab, vocab_fr):
-        super(Averaging, self).__init__(data, args, vocab, vocab_fr)
+    def __init__(self, args, vocab):
+        super(Averaging, self).__init__(args, vocab)
         self.parameters = self.parameters()
-        self.optimizer = optim.Adam(self.parameters, lr=self.args.lr)
+        self.optimizer = optim.Adam(self.parameters, lr=self.lr)
 
-        if args.gpu:
+        if self.gpu:
            self.cuda()
 
         print(self)
@@ -235,24 +236,21 @@ class Averaging(ParaModel):
         return g1, g2, p1, p2
 
     def encode(self, idxs, lengths, fr=0):
-        if fr and not self.share_vocab:
-            word_embs = self.embedding_fr(idxs)
-        else:
-            word_embs = self.embedding(idxs)
+        word_embs = self.embedding(idxs)
 
         if self.dropout > 0:
             word_embs = F.dropout(word_embs, p=self.dropout, training=self.training)
 
         if self.pool == "max":
-            word_embs = utils.max_pool(word_embs, lengths, self.args.gpu)
+            word_embs = utils.max_pool(word_embs, lengths, self.gpu)
         elif self.pool == "mean":
-            word_embs = utils.mean_pool(word_embs, lengths, self.args.gpu)
+            word_embs = utils.mean_pool(word_embs, lengths, self.gpu)
 
         return word_embs
 
 class LSTM(ParaModel):
-    def __init__(self, data, args, vocab, vocab_fr):
-        super(LSTM, self).__init__(data, args, vocab, vocab_fr)
+    def __init__(self, args, vocab):
+        super(LSTM, self).__init__(args, vocab)
 
         self.hidden_dim = self.args.hidden_dim
 

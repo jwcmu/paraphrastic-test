@@ -10,3 +10,5 @@ preprocess/paranmt/fastText-0.9.2
 preprocess/paranmt/para-nmt-50m.txt
 preprocess/paranmt/paranmt.*
 preprocess/paranmt/scratch
+*.sh
+*.txt

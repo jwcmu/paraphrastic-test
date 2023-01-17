@@ -3,8 +3,7 @@ import os
 import io
 import numpy as np
 import logging
-from sacremoses import MosesTokenizer
-from utils import Example
+import utils
 
 from scipy.stats import spearmanr, pearsonr
 
@@ -40,19 +39,19 @@ class STSEval(object):
     def do_prepare(self):
         self.similarity = lambda s1, s2: np.nan_to_num(cosine(np.nan_to_num(s1), np.nan_to_num(s2)))
 
-    def run(self, params, batcher):
+    def run(self, model, batcher):
         results = {}
         for dataset in self.datasets:
             sys_scores = []
             input1, input2, gs_scores = self.data[dataset]
-            for ii in range(0, len(gs_scores), params.batch_size):
-                batch1 = input1[ii:ii + params.batch_size]
-                batch2 = input2[ii:ii + params.batch_size]
+            for ii in range(0, len(gs_scores), model.batchsize):
+                batch1 = input1[ii:ii + model.batchsize]
+                batch2 = input2[ii:ii + model.batchsize]
 
                 # we assume get_batch already throws out the faulty ones
                 if len(batch1) == len(batch2) and len(batch1) > 0:
-                    enc1 = batcher(params, batch1)
-                    enc2 = batcher(params, batch2)
+                    enc1 = batcher(model, batch1)
+                    enc2 = batcher(model, batch2)
 
                     for kk in range(enc2.shape[0]):
                         sys_score = self.similarity(enc1[kk], enc2[kk])
@@ -231,63 +230,46 @@ class SemEval17(STSEval):
 
         return sent1, sent2, gs_scores
 
-def batcher(params, batch):
+def batcher(model, batch):
     batch = [" ".join(s) for s in batch]
     new_batch = []
     for p in batch:
-        if params.tokenize:
-            tok = params.entok.tokenize(p, escape=False)
-            p = " ".join(tok)
-        if params.lower_case:
+        if model.lower_case:
             p = p.lower()
-        if params.model.args.debug:
+        if model.debug:
             print("Logging STS: {0}".format(p))
-        p = params.sp.EncodeAsPieces(p)
-        p = " ".join(p)
-        p = Example(p, params.lower_case)
-        p.populate_embeddings(params.model.vocab, params.model.zero_unk, params.model.ngrams)
+        p = model.sp.EncodeAsIds(p)
         new_batch.append(p)
-    x, l = params.model.torchify_batch(new_batch)
-    vecs = params.model.encode(x, l)
+    x, l = utils.torchify_batch(new_batch, model.gpu)
+    vecs = model.encode(x, l)
     return vecs.detach().cpu().numpy()
 
-def evaluate_sts(model, params):
-
-    sp = spm.SentencePieceProcessor()
-    sp.Load(params.sp_model)
-
-    entok = MosesTokenizer(lang='en')
-
-    from argparse import Namespace
-
-    args = Namespace(batch_size=32, entok=entok, sp=sp,
-                     params=params, model=model, lower_case=params.lower_case,
-                     tokenize=params.tokenize)
+def evaluate_sts(model):
 
     s = STS12Eval('STS/STS12-en-test')
     s.do_prepare()
-    results = s.run(args, batcher)
+    results = s.run(model, batcher)
     s = STS13Eval('STS/STS13-en-test')
     s.do_prepare()
-    results.update(s.run(args, batcher))
+    results.update(s.run(model, batcher))
     s = STS14Eval('STS/STS14-en-test')
     s.do_prepare()
-    results.update(s.run(args, batcher))
+    results.update(s.run(model, batcher))
     s = STS15Eval('STS/STS15-en-test')
     s.do_prepare()
-    results.update(s.run(args, batcher))
+    results.update(s.run(model, batcher))
     s = STS16Eval('STS/STS16-en-test')
     s.do_prepare()
-    results.update(s.run(args, batcher))
+    results.update(s.run(model, batcher))
     s = SemEval17('STS/STS17-test')
     s.do_prepare()
-    results.update(s.run(args, batcher))
+    results.update(s.run(model, batcher))
     s = STSBenchmarkEval('STS/STSBenchmark')
     s.do_prepare()
-    results.update(s.run(args, batcher))
+    results.update(s.run(model, batcher))
     s = STSHard('STS/STSHard')
     s.do_prepare()
-    results.update(s.run(args, batcher))
+    results.update(s.run(model, batcher))
 
     for i in results:
         print(i, results[i])

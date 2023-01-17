@@ -41,5 +41,5 @@ if args.lower_case:
     os.system("mv {0}.temp {0}.all.txt".format(args.paranmt_file.replace(".txt", "")))
 
 spm.SentencePieceTrainer.Train('--input={0}.all.txt --model_prefix=paranmt.{1} --vocab_size=50000 '
-                               '--character_coverage=0.995 --input_sentence_size=10000000 --hard_vocab_limit=false'.format(args.paranmt_file.replace(".txt", ""), args.name))
+                               '--character_coverage=0.995 --input_sentence_size=10000000 --hard_vocab_limit=true --byte_fallback=true'.format(args.paranmt_file.replace(".txt", ""), args.name))
 encode_sp(args.paranmt_file, "{0}.final.txt".format(args.paranmt_file.replace(".txt", "")), 'paranmt.{0}.model'.format(args.name))

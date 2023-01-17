@@ -4,7 +4,6 @@ import sys
 import argparse
 import torch
 from models import Averaging, LSTM, load_model
-from utils import unk_string
 import h5py
 
 random.seed(1)
@@ -31,14 +30,12 @@ parser.add_argument("--zero-unk", default=1, type=int, help="whether to ignore u
 parser.add_argument("--load-file", help="filename to load a pretrained model.")
 parser.add_argument("--save-every-epoch", default=0, type=int, help="whether to save a checkpoint every epoch")
 parser.add_argument("--save-final", type=int, default=0, help="save final model")
-parser.add_argument("--save-interval", type=int, default=10000, help="frequency (in batches) to evaluate and save model")
+parser.add_argument("--save-interval", type=int, default=0, help="frequency (in batches) to evaluate and save model")
 parser.add_argument("--report-interval", type=int, default=10000, help="frequency (in batches) to report training status of epoch")
 parser.add_argument("--outfile", default="model", help="output file name")
 parser.add_argument("--hidden-dim", default=150, type=int, help="hidden dim size of LSTM")
 parser.add_argument("--delta", default=0.4, type=float, help="margin")
-parser.add_argument("--ngrams", default=0, type=int, help="whether to use character n-grams")
 parser.add_argument("--share-encoder", default=1, type=int, help="whether to share the encoder (LSTM only)")
-parser.add_argument("--share-vocab", default=1, type=int, help="whether to share the embeddings")
 parser.add_argument("--scramble-rate", default=0, type=float, help="rate of scrambling")
 parser.add_argument("--sp-model", help="SP model to load for evaluation")
 parser.add_argument("--lower-case", type=int, default=1, help="whether to lowercase eval data")
@@ -55,16 +52,11 @@ def load_vocab(f):
         i = i.strip()
         i = i.split("\t")
         vocab[i[0]] = int(i[1])
-    vocab[unk_string] = len(vocab)
     return vocab
-
-assert args.ngrams == 0
-assert args.share_vocab == 1
 
 data = h5py.File(args.data_file, 'r')
 data = data['data']
 vocab = load_vocab(args.vocab_file)
-vocab_fr = None
 
 if args.load_file is not None:
     model, epoch = load_model(data, args)
@@ -72,12 +64,12 @@ if args.load_file is not None:
     model.train_epochs(start_epoch=epoch)
 else:
     if args.model == "avg":
-        model = Averaging(data, args, vocab, vocab_fr)
+        model = Averaging(args, vocab)
     elif args.model == "lstm":
-        model = LSTM(data, args, vocab, vocab_fr)
+        model = LSTM(args, vocab)
 
     print(" ".join(sys.argv))
     print("Num examples:", len(data))
     print("Num words:", len(vocab))
 
-    model.train_epochs()
+    model.train_epochs(args.data_file)

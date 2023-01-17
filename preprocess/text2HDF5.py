@@ -2,27 +2,34 @@ import sys
 import numpy as np
 import h5py
 from collections import OrderedDict
+import argparse
 
-f = open(sys.argv[1], 'r')
-lines = f.readlines()
+parser = argparse.ArgumentParser()
+
+parser.add_argument('--data-file')
+parser.add_argument('--sp-vocab-file')
+parser.add_argument('--n-rows', type=int, default=2)
+
+args = parser.parse_args()
+
+f = open(args.data_file, 'r')
+data_lines = f.readlines()
+
+f = open(args.sp_vocab_file, 'r')
+vocab_lines = f.readlines()
 
 lis = []
 vocab = OrderedDict()
 
-for i in lines:
+for i in vocab_lines:
     i = i.strip()
     i = i.split('\t')
-    if len(i) != int(sys.argv[2]):
-        continue
-    arr = i[0].split() + i[1].split()
-    for j in arr:
-        if j not in vocab:
-            vocab[j] = len(vocab)
+    vocab[i[0]] = len(vocab)
 
-for i in lines:
+for i in data_lines:
     i = i.strip()
     i = i.split('\t')
-    if len(i) != int(sys.argv[2]):
+    if len(i) != args.n_rows:
         continue
     arr = i[0].split()
     s1 = []
@@ -39,10 +46,10 @@ for i in lines:
 arr = np.array(lis)
 dt = h5py.vlen_dtype(np.dtype('int32'))
 
-f = h5py.File(sys.argv[1].replace("txt","h5"), 'w')
+f = h5py.File(args.data_file.replace("txt","h5"), 'w')
 f.create_dataset("data", data=arr, dtype=dt)
 
-f = open(sys.argv[1].replace("txt","vocab"), 'w')
+f = open(args.data_file.replace("txt","vocab"), 'w')
 for i in vocab:
     f.write("{0}\t{1}\n".format(i,vocab[i]))
 f.close()
